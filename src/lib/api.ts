@@ -217,12 +217,24 @@ export const api = {
   sessions: () => call<unknown[]>("GET", "/api/v1/silicons/me/sessions"),
 
   // -------- search --------
-  search: (params: { q: string; room?: string; sender_kind?: string; since?: string; until?: string; limit?: number }) => {
+  // Block/interval paging: block 0 = first `interval` hits, block 1 = next, …
+  search: (params: {
+    q: string;
+    room?: string;
+    sender_kind?: string;
+    since?: string;
+    until?: string;
+    block?: number;
+    interval?: number;
+  }) => {
     const qs = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== "") qs.set(k, String(v));
     }
-    return call<Event[]>("GET", `/api/v1/events/search?${qs.toString()}`);
+    return call<{ results: Event[]; block: number; interval: number; total: number; has_more: boolean }>(
+      "GET",
+      `/api/v1/events/search?${qs.toString()}`,
+    );
   },
 
   // -------- media --------
