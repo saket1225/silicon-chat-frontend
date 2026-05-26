@@ -2,14 +2,6 @@
 
 export type Kind = "carbon" | "silicon" | "system";
 
-export type TrustLevel =
-  | "very_low"
-  | "low"
-  | "ok"
-  | "high"
-  | "very_high"
-  | "ultimate";
-
 export type EventType =
   | "m.text"
   | "m.image"
@@ -36,7 +28,6 @@ export interface Carbon {
   phone: string;
   name: string;
   profile_photo_key: string;
-  trust_level: TrustLevel;
   email_verified_at: string | null;
   phone_verified_at: string | null;
   created_at: string;
@@ -47,7 +38,6 @@ export interface CarbonPublic {
   username: string;
   name: string;
   profile_photo_key: string;
-  trust_level: TrustLevel;
 }
 
 export interface Silicon {
