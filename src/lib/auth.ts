@@ -4,10 +4,30 @@ import * as React from "react";
 
 import type { AuthSession, Carbon } from "./types";
 
-const ACCESS_KEY = "silicon-chat:access";
-const REFRESH_KEY = "silicon-chat:refresh";
-const CARBON_KEY = "silicon-chat:carbon";
-const SILICON_KEY = "silicon-chat:silicon-key";
+const ACCESS_KEY = "silicon-interface:access";
+const REFRESH_KEY = "silicon-interface:refresh";
+const CARBON_KEY = "silicon-interface:carbon";
+const SILICON_KEY = "silicon-interface:silicon-key";
+
+// One-time migration off the legacy "silicon-chat:" prefix so existing
+// sessions survive the rebrand. Runs once at module load.
+function migrateLegacyKeys() {
+  if (typeof window === "undefined") return;
+  const moves: [string, string][] = [
+    ["silicon-chat:access", ACCESS_KEY],
+    ["silicon-chat:refresh", REFRESH_KEY],
+    ["silicon-chat:carbon", CARBON_KEY],
+    ["silicon-chat:silicon-key", SILICON_KEY],
+  ];
+  for (const [oldKey, newKey] of moves) {
+    const v = window.localStorage.getItem(oldKey);
+    if (v != null && window.localStorage.getItem(newKey) == null) {
+      window.localStorage.setItem(newKey, v);
+    }
+    if (v != null) window.localStorage.removeItem(oldKey);
+  }
+}
+migrateLegacyKeys();
 
 type Listener = () => void;
 const listeners = new Set<Listener>();
