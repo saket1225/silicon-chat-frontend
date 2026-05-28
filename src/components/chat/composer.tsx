@@ -1,39 +1,184 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Paperclip, Send, Sparkles, X } from "lucide-react";
+import {
+  CircleNotch,
+  File as FileIcon,
+  FilePdf,
+  Microphone,
+  Paperclip,
+  PaperPlaneRight,
+  X,
+} from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import type { Event, EventType } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
+import { VoiceRecorder } from "@/components/chat/voice-recorder";
+
+/** Slice of an `Event` we can fabricate locally before the server responds. */
+export interface OptimisticPayload {
+  type: EventType;
+  content?: Record<string, unknown>;
+  reply_to_event_id?: string;
+}
 
 interface Props {
   roomId: string;
+  /**
+   * Called the instant the user presses send, before any network roundtrip,
+   * so the parent can insert a "pending" placeholder bubble.
+   */
+  onOptimisticAdd: (clientId: string, payload: OptimisticPayload) => void;
+  /** Server acked the POST — swap the optimistic placeholder for the real event. */
+  onAck: (clientId: string, real: Event) => void;
+  /** POST failed — mark the optimistic placeholder as failed. */
+  onFail: (clientId: string, error: unknown) => void;
+  /** A file dropped onto the chat surface gets handed in here. */
+  droppedFile?: File | null;
+  onDroppedFileConsumed?: () => void;
 }
 
-export function Composer({ roomId }: Props) {
+// Composer height bounds, in line-heights. Single line by default, expands
+// up to twelve before the textarea starts scrolling internally.
+const MIN_ROWS = 1;
+const MAX_ROWS = 12;
+
+/**
+ * Renders the file the user has queued to send. Images get a real thumbnail
+ * via `URL.createObjectURL`; everything else gets a type-appropriate icon.
+ * The object URL is revoked when the file changes (or this unmounts) so we
+ * don't leak blob memory across attachments.
+ */
+function StagedAttachment({ file, onRemove }: { file: File; onRemove: () => void }) {
+  const isImage = file.type.startsWith("image/");
+  const isVideo = file.type.startsWith("video/");
+  const isAudio = file.type.startsWith("audio/");
+  const isPdf = file.type.includes("pdf");
+
+  const thumbUrl = React.useMemo(
+    () => (isImage || isVideo ? URL.createObjectURL(file) : null),
+    [file, isImage, isVideo],
+  );
+  React.useEffect(() => {
+    return () => {
+      if (thumbUrl) URL.revokeObjectURL(thumbUrl);
+    };
+  }, [thumbUrl]);
+
+  return (
+    <div className="flex items-center gap-3 border bg-card px-3 py-2">
+      <div className="h-12 w-12 shrink-0 overflow-hidden border bg-muted">
+        {isImage && thumbUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element -- local blob URL
+          <img src={thumbUrl} alt="" className="h-full w-full object-cover" />
+        ) : isVideo && thumbUrl ? (
+          // Muted poster of the first frame — no controls, just the still.
+          <video src={thumbUrl} muted className="h-full w-full object-cover" />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+            {isPdf ? <FilePdf className="h-5 w-5" /> : isAudio ? <Microphone className="h-5 w-5" /> : <FileIcon className="h-5 w-5" />}
+          </div>
+        )}
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs font-medium">{file.name}</div>
+        <div className="label-mono text-[10px] text-muted-foreground">
+          {formatBytes(file.size)}
+        </div>
+      </div>
+      <Button size="icon" variant="ghost" onClick={onRemove} aria-label="remove attachment">
+        <X className="h-3.5 w-3.5" />
+      </Button>
+    </div>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function newClientId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function Composer({
+  roomId,
+  onOptimisticAdd,
+  onAck,
+  onFail,
+  droppedFile,
+  onDroppedFileConsumed,
+}: Props) {
   const [text, setText] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
-  const [voiceMode, setVoiceMode] = React.useState(false);
-  const [voiceName, setVoiceName] = React.useState("Puck");
-  const [scene, setScene] = React.useState("");
-  const [style, setStyle] = React.useState("");
+  const [recording, setRecording] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+  const taRef = React.useRef<HTMLTextAreaElement>(null);
+
+  // Pull dropped files in from RoomView. We only treat it as a hint — the
+  // parent clears its own state via `onDroppedFileConsumed` once we've taken
+  // ownership.
+  React.useEffect(() => {
+    if (droppedFile) {
+      setFile(droppedFile);
+      onDroppedFileConsumed?.();
+    }
+  }, [droppedFile, onDroppedFileConsumed]);
+
+  // Auto-grow the textarea between MIN_ROWS and MAX_ROWS lines. Done
+  // imperatively because Tailwind has no rows-from-content primitive — we
+  // measure scrollHeight, clamp, and scroll internally past the ceiling.
+  React.useLayoutEffect(() => {
+    const el = taRef.current;
+    if (!el) return;
+    const lineH = parseFloat(getComputedStyle(el).lineHeight) || 20;
+    const padding =
+      parseFloat(getComputedStyle(el).paddingTop) +
+      parseFloat(getComputedStyle(el).paddingBottom);
+    const minH = lineH * MIN_ROWS + padding;
+    const maxH = lineH * MAX_ROWS + padding;
+    el.style.height = "0px";
+    const next = Math.min(Math.max(el.scrollHeight, minH), maxH);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > maxH ? "auto" : "hidden";
+  }, [text]);
 
   const reset = () => {
     setText("");
     setFile(null);
-    setVoiceMode(false);
-    setScene("");
-    setStyle("");
   };
 
-  const sendText = async () => {
-    if (!text.trim() && !file && !voiceMode) return;
+  const sendTextOptimistic = (body: string) => {
+    const clientId = newClientId();
+    const payload: OptimisticPayload = {
+      type: "m.text",
+      content: { body },
+    };
+    onOptimisticAdd(clientId, payload);
+    api
+      .sendEvent(roomId, payload)
+      .then((real) => onAck(clientId, real))
+      .catch((err) => onFail(clientId, err));
+  };
+
+  const send = async () => {
+    const body = text.trim();
+    if (!body && !file) return;
+
+    // Fast path — text only. Optimistic, doesn't block the input.
+    if (!file && body) {
+      sendTextOptimistic(body);
+      setText("");
+      return;
+    }
+
     setBusy(true);
     try {
       if (file) {
@@ -49,30 +194,20 @@ export function Composer({ roomId }: Props) {
           const form = new FormData();
           for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
           form.append("file", file);
-          await fetch(r.upload.url, { method: "POST", body: form });
+          const up = await fetch(r.upload.url, { method: "POST", body: form });
+          if (!up.ok) throw new Error(`upload failed (${up.status})`);
+          // Confirm to Glass so MediaObject.status flips pending → ready —
+          // otherwise mediaDetail keeps returning download_url:null and the
+          // attachment spins on a loading state forever.
+          await api.mediaComplete(mediaId);
         }
         await api.sendEvent(roomId, {
           type: file.type.startsWith("image/") ? "m.image" : "m.file",
           content: {
             media_id: mediaId,
             mime: file.type,
-            caption: text.trim() || file.name,
+            caption: body || file.name,
           },
-        });
-      }
-      if (voiceMode && text.trim()) {
-        await api.tts({
-          text: text.trim(),
-          voice: voiceName,
-          scene: scene || undefined,
-          style: style || undefined,
-          room_id: roomId,
-        });
-        toast.success("TTS queued");
-      } else if (!file && text.trim()) {
-        await api.sendEvent(roomId, {
-          type: "m.text",
-          content: { body: text.trim() },
         });
       }
       reset();
@@ -84,34 +219,61 @@ export function Composer({ roomId }: Props) {
     }
   };
 
+  // ----- Voice recording -----
+
+  const onVoiceSubmit = async (blob: Blob, durationMs: number) => {
+    setRecording(false);
+    setBusy(true);
+    try {
+      const filename = `voice-${Date.now()}.webm`;
+      const r = await api.presignUpload({
+        mime: blob.type || "audio/webm",
+        size: blob.size,
+        kind: "voice",
+        filename,
+        room_id: roomId,
+      });
+      const mediaId = r.media.media_id;
+      if (!r.upload.dev_mode) {
+        const form = new FormData();
+        for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+        form.append("file", blob, filename);
+        const up = await fetch(r.upload.url, { method: "POST", body: form });
+        if (!up.ok) throw new Error(`upload failed (${up.status})`);
+        await api.mediaComplete(mediaId);
+      }
+      await api.sendEvent(roomId, {
+        type: "m.voice",
+        content: {
+          media_id: mediaId,
+          mime: blob.type || "audio/webm",
+          duration_ms: durationMs,
+        },
+      });
+    } catch (e) {
+      const msg = e instanceof ApiError ? e.message : String(e);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Render the recorder in place of the textarea row when active.
+  if (recording) {
+    return (
+      <div className="border-t bg-background p-3">
+        <VoiceRecorder
+          active
+          onCancel={() => setRecording(false)}
+          onSubmit={onVoiceSubmit}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2 border-t bg-background p-3">
-      {file && (
-        <div className="flex items-center justify-between rounded-md border bg-muted px-3 py-1.5 text-xs">
-          <span className="truncate">
-            attached: <strong>{file.name}</strong> ({Math.round(file.size / 1024)} KB)
-          </span>
-          <Button size="icon" variant="ghost" onClick={() => setFile(null)}>
-            <X className="h-3.5 w-3.5" />
-          </Button>
-        </div>
-      )}
-      {voiceMode && (
-        <div className="grid grid-cols-3 gap-2 rounded-md border bg-muted/40 p-2">
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase text-muted-foreground">voice</label>
-            <Input value={voiceName} onChange={(e) => setVoiceName(e.target.value)} placeholder="Puck" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase text-muted-foreground">scene</label>
-            <Input value={scene} onChange={(e) => setScene(e.target.value)} placeholder="on terrace" />
-          </div>
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase text-muted-foreground">style</label>
-            <Input value={style} onChange={(e) => setStyle(e.target.value)} placeholder="dreamy" />
-          </div>
-        </div>
-      )}
+      {file && <StagedAttachment file={file} onRemove={() => setFile(null)} />}
       <div className="flex items-end gap-2">
         <input
           type="file"
@@ -128,32 +290,39 @@ export function Composer({ roomId }: Props) {
         >
           <Paperclip />
         </Button>
-        <Button
-          size="icon"
-          variant={voiceMode ? "default" : "ghost"}
-          onClick={() => setVoiceMode((v) => !v)}
-          title="send as silicon-spoken voice (TTS)"
-          disabled={busy}
-        >
-          <Sparkles />
-        </Button>
-        <Textarea
+        <textarea
+          ref={taRef}
           value={text}
           onChange={(e) => setText(e.target.value)}
-          placeholder={voiceMode ? "what should the silicon say?" : "message…"}
-          className="min-h-[40px] flex-1 resize-none"
-          rows={2}
+          placeholder="message…"
+          rows={MIN_ROWS}
+          className="min-w-0 flex-1 resize-none border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors focus-visible:border-ring"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
-              sendText();
+              send();
             }
           }}
         />
-        <Button onClick={sendText} disabled={busy}>
-          {busy ? <Loader2 className="animate-spin" /> : <Send />}
-          <span className="hidden sm:inline">send</span>
-        </Button>
+        {/* Right-most: voice when the user has nothing typed/attached,
+            otherwise the send button — same affordance as WhatsApp. */}
+        {!text.trim() && !file ? (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setRecording(true)}
+            disabled={busy}
+            title="record voice message"
+            aria-label="record voice message"
+          >
+            <Microphone />
+          </Button>
+        ) : (
+          <Button onClick={send} disabled={busy}>
+            {busy ? <CircleNotch className="animate-spin" /> : <PaperPlaneRight />}
+            <span className="hidden sm:inline">send</span>
+          </Button>
+        )}
       </div>
     </div>
   );

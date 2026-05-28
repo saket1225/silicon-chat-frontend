@@ -4,10 +4,16 @@ import { env } from "./env";
 import { authStore } from "./auth";
 import type {
   AuthSession,
+  BillingAddon,
+  BillingCycle,
+  BillingData,
   Carbon,
   CarbonPublic,
   DevOtpResponse,
   Event,
+  Invite,
+  InviteInfo,
+  Invitee,
   JwtPair,
   LoginStartResponse,
   MediaObject,
@@ -15,6 +21,8 @@ import type {
   Silicon,
   SiliconPublic,
   TakeBackPolicy,
+  Team,
+  TeamMembership,
 } from "./types";
 
 class ApiError extends Error {
@@ -23,11 +31,46 @@ class ApiError extends Error {
   }
 }
 
+// Transparent refresh: when an authed call returns 401 and we have a refresh
+// token, swap the access token (and rotated refresh, since Glass has
+// ROTATE_REFRESH_TOKENS=True) and replay the original request exactly once.
+// Refresh failures are swallowed — we do NOT clear the auth store here. The
+// user stays "signed in" client-side; the next attempt will simply try again.
+// Concurrent 401s share a single in-flight refresh so we don't stampede the
+// endpoint.
+let refreshInflight: Promise<boolean> | null = null;
+async function tryRefresh(): Promise<boolean> {
+  if (refreshInflight) return refreshInflight;
+  const refreshTok = authStore.getRefresh();
+  if (!refreshTok) return false;
+  refreshInflight = (async () => {
+    try {
+      const r = await call<{ access: string; refresh?: string }>(
+        "POST",
+        "/api/v1/auth/refresh",
+        { refresh: refreshTok },
+        { auth: false },
+      );
+      authStore.setTokens(
+        r.access,
+        r.refresh ?? refreshTok,
+        authStore.getCarbon() ?? undefined,
+      );
+      return true;
+    } catch {
+      return false;
+    } finally {
+      refreshInflight = null;
+    }
+  })();
+  return refreshInflight;
+}
+
 async function call<T>(
   method: string,
   path: string,
   body?: unknown,
-  opts: { auth?: boolean } = {},
+  opts: { auth?: boolean; _retried?: boolean } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
     Accept: "application/json",
@@ -52,6 +95,15 @@ async function call<T>(
           ? JSON.stringify(body)
           : undefined,
   });
+  if (
+    resp.status === 401 &&
+    opts.auth !== false &&
+    !opts._retried &&
+    authStore.getAccess() // skip refresh dance for silicon-key-only callers
+  ) {
+    const ok = await tryRefresh();
+    if (ok) return call<T>(method, path, body, { ...opts, _retried: true });
+  }
   const ct = resp.headers.get("content-type") || "";
   const parsed: unknown = ct.includes("application/json")
     ? await resp.json().catch(() => null)
@@ -84,12 +136,19 @@ export const api = {
     call<{ flow_id?: string; existing?: boolean }>("POST", "/api/v1/auth/register/phone/start", { phone, flow_id }, { auth: false }),
   registerPhoneVerify: (flow_id: string, phone: string, code: string) =>
     call<{ verified: boolean }>("POST", "/api/v1/auth/register/phone/verify", { flow_id, phone, code }, { auth: false }),
-  registerEmailStart: (flow_id: string, email: string) =>
-    call<{ existing?: boolean }>("POST", "/api/v1/auth/register/email/start", { flow_id, email }, { auth: false }),
+  registerEmailStart: (email: string, flow_id?: string) =>
+    call<{ flow_id?: string; existing?: boolean }>("POST", "/api/v1/auth/register/email/start", { email, flow_id }, { auth: false }),
   registerEmailVerify: (flow_id: string, email: string, code: string) =>
     call<{ verified: boolean }>("POST", "/api/v1/auth/register/email/verify", { flow_id, email, code }, { auth: false }),
   registerUsername: (flow_id: string, username?: string) =>
     call<AuthSession>("POST", "/api/v1/auth/register/username", { flow_id, username }, { auth: false }),
+  carbonIdAvailable: (value: string) =>
+    call<{ available: boolean; valid: boolean; reason: string }>(
+      "GET",
+      `/api/v1/auth/carbon-id/available?value=${encodeURIComponent(value)}`,
+      undefined,
+      { auth: false },
+    ),
 
   // -------- login --------
   loginStart: (identifier: string) =>
@@ -104,7 +163,7 @@ export const api = {
   loginVerify: (challenge_id: string, code: string) =>
     call<JwtPair>("POST", "/api/v1/auth/login/verify", { challenge_id, code }, { auth: false }),
   refresh: (refresh: string) =>
-    call<{ access: string }>("POST", "/api/v1/auth/refresh", { refresh }, { auth: false }),
+    call<{ access: string; refresh?: string }>("POST", "/api/v1/auth/refresh", { refresh }, { auth: false }),
 
   // -------- profile --------
   me: () => call<Carbon>("GET", "/api/v1/carbons/me"),
@@ -117,12 +176,73 @@ export const api = {
   setTakeBackPolicy: (p: Partial<TakeBackPolicy>) =>
     call<TakeBackPolicy>("PATCH", "/api/v1/carbons/me/take-back-policy", p),
 
-  // -------- orgs --------
-  orgs: () => call<unknown[]>("GET", "/api/v1/orgs/"),
-  createOrg: (data: { name: string; slug?: string }) => call<unknown>("POST", "/api/v1/orgs/", data),
+  // -------- teams --------
+  teams: () => call<Team[]>("GET", "/api/v1/teams/"),
+  team: (slug: string) => call<Team>("GET", `/api/v1/teams/${slug}/`),
+  createTeam: (data: { name: string; slug?: string }) => call<Team>("POST", "/api/v1/teams/", data),
+  patchTeam: (slug: string, patch: Partial<Team>) => call<Team>("PATCH", `/api/v1/teams/${slug}/`, patch),
+  teamMembers: (slug: string) => call<TeamMembership[]>("GET", `/api/v1/teams/${slug}/members`),
+  teamReactivity: (slug: string) => call<{ value: number }>("GET", `/api/v1/teams/${slug}/reactivity`),
+  teamStructure: (slug: string) => call<{ svg: string }>("GET", `/api/v1/teams/${slug}/structure`),
+  teamInvites: (slug: string) => call<Invite[]>("GET", `/api/v1/teams/${slug}/invites`),
+  createInvite: (
+    slug: string,
+    data: {
+      scope?: "team" | "silicon";
+      silicon_id?: string;
+      channel?: "link" | "email";
+      email_target?: string;
+      role?: string;
+      max_uses?: number;
+      ttl_minutes?: number;
+    },
+  ) => call<Invite>("POST", `/api/v1/teams/${slug}/invites`, data),
+  teamInvitees: (slug: string, offset = 0, limit = 5) =>
+    call<{ results: Invitee[]; total: number; has_more: boolean }>(
+      "GET",
+      `/api/v1/teams/${slug}/invitees?offset=${offset}&limit=${limit}`,
+    ),
+  inviteInfo: (token: string) => call<InviteInfo>("GET", `/api/v1/invites/${encodeURIComponent(token)}`),
+  acceptInvite: (token: string, body: { code?: string } = {}) =>
+    call<{ joined: string; scope: string; role: string }>(
+      "POST",
+      `/api/v1/invites/${encodeURIComponent(token)}/accept`,
+      body,
+    ),
+  inviteVerifyEmailStart: (token: string, email: string) =>
+    call<{ sent?: boolean; verified?: boolean }>(
+      "POST",
+      `/api/v1/invites/${encodeURIComponent(token)}/verify-email/start`,
+      { email },
+    ),
+  inviteVerifyEmailCheck: (token: string, email: string, code: string) =>
+    call<{ verified: boolean }>(
+      "POST",
+      `/api/v1/invites/${encodeURIComponent(token)}/verify-email/check`,
+      { email, code },
+    ),
+
+  // -------- billing (team heads) --------
+  teamBilling: (slug: string) => call<BillingData>("GET", `/api/v1/teams/${slug}/billing`),
+  setTeamPlan: (slug: string, amount_cents: number, currency = "USD") =>
+    call<{ monthly_cost_cents: number; currency: string }>(
+      "POST",
+      `/api/v1/teams/${slug}/billing/plan`,
+      { amount_cents, currency },
+    ),
+  addTeamAddon: (slug: string, data: { label: string; amount_cents: number; recurring?: boolean }) =>
+    call<BillingAddon>("POST", `/api/v1/teams/${slug}/billing/addons`, data),
+  rollTeamCycle: (slug: string) =>
+    call<BillingCycle>("POST", `/api/v1/teams/${slug}/billing/roll`, {}),
+  teamCheckout: (slug: string, return_url = "") =>
+    call<{ checkout_url: string; payment_id: string; dev_mode?: boolean; error?: string }>(
+      "POST",
+      `/api/v1/teams/${slug}/billing/checkout`,
+      { return_url },
+    ),
 
   // -------- silicons (admin) --------
-  createSilicon: (data: { name: string; org_slug: string; capabilities?: Record<string, unknown> }) =>
+  createSilicon: (data: { name: string; team_slug: string; capabilities?: Record<string, unknown> }) =>
     call<Silicon>("POST", "/api/v1/silicons/", data),
   mintSiliconKey: (silicon_id: string, label = "") =>
     call<{ id: number; prefix: string; label: string; plaintext: string; warning: string }>(
@@ -249,6 +369,13 @@ export const api = {
       "GET",
       `/api/v1/media/${media_id}`,
     ),
+  /**
+   * Confirm an S3 upload completed. Flips MediaObject.status from "pending"
+   * to "ready" so subsequent /media/<id> returns a download_url instead of
+   * the loading placeholder. Idempotent.
+   */
+  mediaComplete: (media_id: string) =>
+    call<MediaObject>("POST", `/api/v1/media/${media_id}/complete`, {}),
 
   // -------- voice --------
   tts: (data: { text: string; voice?: string; scene?: string; style?: string; room_id?: string }) =>

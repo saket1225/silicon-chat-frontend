@@ -1,0 +1,393 @@
+"use client";
+
+import * as React from "react";
+import { Copy, FileText, ImageSquare, LinkSimple, MicrophoneStage, SquaresFour } from "@phosphor-icons/react/dist/ssr";
+import { toast } from "sonner";
+
+import { api } from "@/lib/api";
+import type { CarbonPublic, Event, Room, SiliconPublic } from "@/lib/types";
+import { cn } from "@/lib/utils";
+
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { IdAvatar } from "@/components/profile/id-avatar";
+import { MediaAttachment } from "./media-attachment";
+
+const URL_RE = /\bhttps?:\/\/[^\s<>"']+/g;
+
+type SenderRef = { kind: "carbon" | "silicon"; handle: string };
+
+interface Props {
+  room: Room;
+  events: Event[];
+  currentUsername?: string;
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  /** Optional override — when set, the drawer shows this specific sender's
+   *  profile instead of the room's default counterpart. */
+  focusSender?: SenderRef | null;
+}
+
+type TabId = "all" | "images" | "files" | "voice" | "links";
+
+const TABS: { id: TabId; label: string; icon: React.ReactNode }[] = [
+  { id: "all", label: "all", icon: <SquaresFour className="h-3.5 w-3.5" /> },
+  { id: "images", label: "images", icon: <ImageSquare className="h-3.5 w-3.5" /> },
+  { id: "files", label: "files", icon: <FileText className="h-3.5 w-3.5" /> },
+  { id: "voice", label: "voice", icon: <MicrophoneStage className="h-3.5 w-3.5" /> },
+  { id: "links", label: "links", icon: <LinkSimple className="h-3.5 w-3.5" /> },
+];
+
+export function ProfileDrawer({
+  room,
+  events,
+  currentUsername,
+  open,
+  onOpenChange,
+  focusSender,
+}: Props) {
+  // Sender priority: explicit focus → first non-me sender → first room peer.
+  const counterpart: SenderRef | null = React.useMemo(() => {
+    if (focusSender) return focusSender;
+    for (const e of events) {
+      if (
+        (e.sender_kind === "carbon" || e.sender_kind === "silicon") &&
+        e.sender_handle &&
+        e.sender_handle !== currentUsername
+      ) {
+        return { kind: e.sender_kind, handle: e.sender_handle };
+      }
+    }
+    if (room.peers.length > 0) {
+      return { kind: room.peers[0].kind, handle: room.peers[0].handle };
+    }
+    return null;
+  }, [focusSender, events, currentUsername, room.peers]);
+
+  const [profile, setProfile] = React.useState<CarbonPublic | SiliconPublic | null>(null);
+  const [tab, setTab] = React.useState<TabId>("all");
+
+  React.useEffect(() => {
+    if (!open || !counterpart) return;
+    let alive = true;
+    (async () => {
+      try {
+        const p =
+          counterpart.kind === "carbon"
+            ? await api.carbonByHandle(counterpart.handle)
+            : await api.siliconByHandle(counterpart.handle);
+        if (alive) setProfile(p);
+      } catch {
+        /* ignore — drawer falls back to handle-only display */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [open, counterpart]);
+
+  // Reset to "all" each time the drawer is freshly opened so users land on
+  // the most informative tab by default.
+  React.useEffect(() => {
+    if (open) setTab("all");
+  }, [open]);
+
+  const images = React.useMemo(
+    () => events.filter((e) => e.type === "m.image" && e.content.media_id),
+    [events],
+  );
+  const files = React.useMemo(
+    () => events.filter((e) => e.type === "m.file" && e.content.media_id),
+    [events],
+  );
+  const voice = React.useMemo(
+    () => events.filter((e) => e.type === "m.voice" && e.content.media_id),
+    [events],
+  );
+  const links = React.useMemo(() => {
+    const out: string[] = [];
+    for (const e of events) {
+      if (e.type === "m.text") {
+        const found = String(e.content.body ?? "").match(URL_RE);
+        if (found) out.push(...found);
+      }
+    }
+    return Array.from(new Set(out));
+  }, [events]);
+
+  const counts: Record<TabId, number> = {
+    all: images.length + files.length + voice.length + links.length,
+    images: images.length,
+    files: files.length,
+    voice: voice.length,
+    links: links.length,
+  };
+
+  // Derived display strings — never bare "@" anywhere.
+  const handle = profile
+    ? "carbon_id" in profile
+      ? profile.carbon_id
+      : profile.silicon_id
+    : counterpart?.handle ?? room.peers[0]?.handle ?? "";
+  const displayName = profile?.name?.trim() || handle;
+  const photoUrl = profile?.profile_photo_url ?? null;
+  const bio = profile?.tagline ?? "";
+  const username = profile && "username" in profile ? profile.username : "";
+
+  const copy = (label: string, value: string) => {
+    navigator.clipboard.writeText(value);
+    toast.success(`${label} copied`);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[88vh] w-full max-w-md overflow-y-auto">
+        <DialogHeader className="sr-only">
+          <DialogTitle>{displayName}</DialogTitle>
+        </DialogHeader>
+
+        {/* Avatar in a centered card — the focal point of the dialog. */}
+        <div className="flex flex-col items-center gap-3">
+          <div className="border bg-card p-4">
+            <IdAvatar seed={handle || "?"} src={photoUrl} size={120} />
+          </div>
+          <div className="text-center">
+            <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
+            {profile && (
+              <p className="text-xs text-muted-foreground">
+                {counterpart?.kind === "silicon" ? "Silicon" : "Carbon"}
+              </p>
+            )}
+          </div>
+        </div>
+
+        {/* Copyable identity chips. Each chip is a click-to-copy button. */}
+        <div className="mt-3 space-y-1.5">
+          {handle && (
+            <CopyChip
+              label="carbon id"
+              value={handle}
+              onCopy={() => copy("Carbon ID", handle)}
+            />
+          )}
+          {username && username !== handle && (
+            <CopyChip
+              label="username"
+              value={`@${username}`}
+              onCopy={() => copy("Username", username)}
+            />
+          )}
+        </div>
+
+        {bio && (
+          <p className="mt-4 px-1 text-center text-sm text-muted-foreground">{bio}</p>
+        )}
+
+        {/* Attachment tabs */}
+        <div className="mt-5 border-t pt-4">
+          <div className="flex flex-wrap gap-1">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={cn(
+                  "inline-flex items-center gap-1.5 border px-2.5 py-1 text-xs transition-colors",
+                  tab === t.id
+                    ? "border-foreground bg-foreground text-background"
+                    : "border-border bg-card hover:bg-accent",
+                )}
+              >
+                {t.icon}
+                <span>{t.label}</span>
+                <span
+                  className={cn(
+                    "label-mono text-[10px]",
+                    tab === t.id ? "opacity-70" : "text-muted-foreground",
+                  )}
+                >
+                  {counts[t.id]}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 min-h-32">
+            {tab === "all" && (
+              <AllTab
+                images={images}
+                files={files}
+                voice={voice}
+                links={links}
+                empty={counts.all === 0}
+              />
+            )}
+            {tab === "images" && <ImagesTab events={images} />}
+            {tab === "files" && <FilesTab events={files} />}
+            {tab === "voice" && <VoiceTab events={voice} />}
+            {tab === "links" && <LinksTab links={links} />}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Bits & pieces
+// ---------------------------------------------------------------------------
+
+function CopyChip({
+  label,
+  value,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  onCopy: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      title={`copy ${label}`}
+      className="flex w-full items-center justify-between gap-2 border bg-card px-3 py-2 text-left transition-colors hover:bg-accent"
+    >
+      <span className="flex min-w-0 flex-col">
+        <span className="label-mono text-[10px] opacity-60">{label}</span>
+        <span className="truncate font-mono text-xs">{value}</span>
+      </span>
+      <Copy className="h-3.5 w-3.5 shrink-0 opacity-60" />
+    </button>
+  );
+}
+
+function Empty({
+  title = "all attachments would be displayed here",
+  hint = "send an attachment to see them here.",
+}: {
+  title?: string;
+  hint?: string;
+}) {
+  return (
+    <div className="space-y-1 border border-dashed bg-card px-4 py-8 text-center text-xs text-muted-foreground">
+      <p className="text-sm text-foreground">{title}</p>
+      <p>{hint}</p>
+    </div>
+  );
+}
+
+function AllTab({
+  images,
+  files,
+  voice,
+  links,
+  empty,
+}: {
+  images: Event[];
+  files: Event[];
+  voice: Event[];
+  links: string[];
+  empty: boolean;
+}) {
+  if (empty) return <Empty />;
+  return (
+    <div className="space-y-5">
+      {images.length > 0 && (
+        <Section title="images">
+          <ImagesTab events={images} />
+        </Section>
+      )}
+      {files.length > 0 && (
+        <Section title="files">
+          <FilesTab events={files} />
+        </Section>
+      )}
+      {voice.length > 0 && (
+        <Section title="voice">
+          <VoiceTab events={voice} />
+        </Section>
+      )}
+      {links.length > 0 && (
+        <Section title="links">
+          <LinksTab links={links} />
+        </Section>
+      )}
+    </div>
+  );
+}
+
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div className="space-y-2">
+      <h3 className="label-mono text-[10px] opacity-60">{title}</h3>
+      {children}
+    </div>
+  );
+}
+
+function ImagesTab({ events }: { events: Event[] }) {
+  if (events.length === 0) return <Empty title="no images yet" hint="send an image to see it here." />;
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      {events.map((e) => (
+        <MediaAttachment
+          key={e.event_id}
+          mediaId={String(e.content.media_id)}
+          mime={e.content.mime ? String(e.content.mime) : "image/*"}
+        />
+      ))}
+    </div>
+  );
+}
+
+function FilesTab({ events }: { events: Event[] }) {
+  if (events.length === 0) return <Empty title="no files yet" hint="send a file to see it here." />;
+  return (
+    <div className="space-y-2">
+      {events.map((e) => (
+        <MediaAttachment
+          key={e.event_id}
+          mediaId={String(e.content.media_id)}
+          mime={e.content.mime ? String(e.content.mime) : undefined}
+          caption={e.content.caption ? String(e.content.caption) : undefined}
+        />
+      ))}
+    </div>
+  );
+}
+
+function VoiceTab({ events }: { events: Event[] }) {
+  if (events.length === 0) return <Empty title="no voice notes yet" hint="record a voice note to see it here." />;
+  return (
+    <div className="space-y-2">
+      {events.map((e) => (
+        <MediaAttachment key={e.event_id} mediaId={String(e.content.media_id)} mime="audio/mpeg" />
+      ))}
+    </div>
+  );
+}
+
+function LinksTab({ links }: { links: string[] }) {
+  if (links.length === 0) return <Empty title="no links yet" hint="share a link to see it here." />;
+  return (
+    <ul className="space-y-1">
+      {links.map((u) => (
+        <li key={u}>
+          <a
+            href={u}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block truncate text-sm text-primary hover:underline"
+          >
+            {u}
+          </a>
+        </li>
+      ))}
+    </ul>
+  );
+}

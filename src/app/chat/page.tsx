@@ -2,15 +2,33 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import type { Room } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
+import { useTeams } from "@/lib/use-teams";
+import { cn } from "@/lib/utils";
 
+import { Button } from "@/components/ui/button";
 import { RoomList } from "@/components/chat/room-list";
 import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
+import { TeamFilterBar, EMPTY_FILTERS, type ChatFilters } from "@/components/teams/team-filter-bar";
+import { TeamPanel } from "@/components/teams/team-panel";
+
+// Resizable sidebar bounds + storage. Width persists across reloads.
+const SB_DEFAULT = 320;
+const SB_MIN = 240;
+const SB_MAX = 560;
+const SB_STORAGE = "silicon-interface:sidebar-width";
+
+function loadSidebarWidth(): number {
+  if (typeof window === "undefined") return SB_DEFAULT;
+  const v = Number(window.localStorage.getItem(SB_STORAGE));
+  return Number.isFinite(v) && v >= SB_MIN && v <= SB_MAX ? v : SB_DEFAULT;
+}
 
 export default function ChatPage() {
   const router = useRouter();
@@ -19,67 +37,187 @@ export default function ChatPage() {
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [dialogOpen, setDialogOpen] = React.useState(false);
+  const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
+  const [panelSlug, setPanelSlug] = React.useState<string | null>(null);
+  const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
+  // Hover-to-switch while dragging a file over a sidebar row.
+  const [hoverRoomId, setHoverRoomId] = React.useState<string | null>(null);
+  const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const socket = useChatSocket();
+  const { teams } = useTeams();
+
+  const clearHover = React.useCallback(() => {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
+    setHoverRoomId(null);
+  }, []);
+
+  // Drop / dragend anywhere cleans the in-flight hover-switch timer so we
+  // don't accidentally swap rooms after the drag is over.
+  React.useEffect(() => {
+    const reset = () => clearHover();
+    window.addEventListener("dragend", reset);
+    window.addEventListener("drop", reset);
+    return () => {
+      window.removeEventListener("dragend", reset);
+      window.removeEventListener("drop", reset);
+    };
+  }, [clearHover]);
+
+  const onRoomDragEnter = React.useCallback(
+    (roomId: string) => {
+      if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+      setHoverRoomId(roomId);
+      // 1.2s threshold matches the user's mental model: long enough to avoid
+      // accidental switches while gliding through the list, short enough to
+      // feel responsive once they hold deliberately.
+      hoverTimerRef.current = setTimeout(() => {
+        if (roomId !== selected) router.push(`/chat?room=${roomId}`);
+        hoverTimerRef.current = null;
+      }, 1200);
+    },
+    [router, selected],
+  );
+  const onRoomDragLeave = React.useCallback(
+    (roomId: string) => {
+      if (hoverRoomId === roomId) clearHover();
+    },
+    [hoverRoomId, clearHover],
+  );
+
+  // Drag the right edge of the sidebar to resize. Uses pointer events so it
+  // works for mouse, pen, and touch on resizable screens.
+  const startResize = React.useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarW;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    let lastW = startW;
+    const onMove = (ev: PointerEvent) => {
+      lastW = Math.max(SB_MIN, Math.min(SB_MAX, startW + (ev.clientX - startX)));
+      setSidebarW(lastW);
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      try {
+        window.localStorage.setItem(SB_STORAGE, String(lastW));
+      } catch {
+        /* storage may be unavailable; the width is still in state */
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }, [sidebarW]);
 
   const refresh = React.useCallback(async () => {
-    setLoading(true);
     try {
-      const list = await api.rooms();
-      setRooms(list);
+      setRooms(await api.rooms());
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setLoading(false);
     }
+    setLoading(false);
   }, []);
 
   React.useEffect(() => {
-    refresh();
+    void refresh();
   }, [refresh]);
 
-  // Keep the socket subscribed to every room we know about. The consumer only
-  // auto-joins rooms that existed at connect time, so rooms created or opened
-  // later (e.g. a fresh DM) need an explicit subscribe to get live fan-out.
+  // Keep the socket subscribed to every room we know about.
   React.useEffect(() => {
     if (!socket.ready) return;
     for (const r of rooms) socket.send({ type: "subscribe", room_id: r.room_id });
   }, [socket.ready, rooms, socket.send]);
 
-  // When a new event arrives in a room we don't yet have locally, refresh.
+  // When an event arrives in a room we don't have locally yet, refresh.
   React.useEffect(() => {
     if (!socket.lastFrame) return;
     if (socket.lastFrame.type === "event") {
       const rid = socket.lastFrame.room_id;
-      if (!rooms.some((r) => r.room_id === rid)) {
-        refresh();
-      }
+      if (!rooms.some((r) => r.room_id === rid)) void refresh();
     }
   }, [socket.lastFrame, rooms, refresh]);
+
+  const filtered = React.useMemo(() => {
+    return rooms.filter((r) => {
+      if (filters.unread && !r.unread) return false;
+      if (filters.teams.length && !(r.team_slug && filters.teams.includes(r.team_slug))) return false;
+      if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
+      return true;
+    });
+  }, [rooms, filters]);
 
   const selectedRoom = rooms.find((r) => r.room_id === selected);
 
   return (
     <>
-      <RoomList
-        rooms={rooms}
-        selectedId={selected}
-        onSelect={(id) => router.push(`/chat?room=${id}`)}
-        onNew={() => setDialogOpen(true)}
-        loading={loading}
-      />
+      {/* Left column — filter bar + conversation list. Hidden on mobile when a
+          conversation is open (Telegram-style single-pane on small screens). */}
+      <aside
+        style={{ ["--sidebar-w" as string]: `${sidebarW}px` }}
+        className={cn(
+          "relative w-full shrink-0 flex-col border-r md:flex md:w-[var(--sidebar-w)]",
+          selected ? "hidden" : "flex",
+        )}
+      >
+        {/* Drag handle — right edge, desktop only. */}
+        <div
+          onPointerDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="resize sidebar"
+          className="absolute right-0 top-0 z-10 hidden h-full w-1.5 cursor-col-resize transition-colors hover:bg-border md:block"
+        />
+        <div className="flex items-center justify-between border-b py-1.5 pl-6 pr-2">
+          <h2 className="text-sm font-semibold tracking-tight">Chats</h2>
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setDialogOpen(true)}
+            aria-label="new chat"
+            title="new chat"
+            className="h-7 w-7"
+          >
+            <Plus />
+          </Button>
+        </div>
+        <TeamFilterBar
+          teams={teams}
+          filters={filters}
+          onChange={setFilters}
+          onOpenTeam={(slug) => setPanelSlug(slug)}
+        />
+        <RoomList
+          rooms={filtered}
+          selectedId={selected}
+          onSelect={(id) => router.push(`/chat?room=${id}`)}
+          onNew={() => setDialogOpen(true)}
+          loading={loading}
+          hoverRoomId={hoverRoomId}
+          onRoomDragEnter={onRoomDragEnter}
+          onRoomDragLeave={onRoomDragLeave}
+        />
+      </aside>
+
       {selectedRoom ? (
         <RoomView room={selectedRoom} socket={socket} />
       ) : (
-        <section className="flex flex-1 items-center justify-center bg-muted/20">
+        <section className="hidden flex-1 items-center justify-center bg-muted/20 md:flex">
           <div className="max-w-md space-y-3 text-center">
             <h2 className="text-2xl font-bold tracking-tight">welcome</h2>
             <p className="text-sm text-muted-foreground">
-              Pick a room on the left, or click <strong>new</strong> to start a direct
-              conversation with another carbon or a silicon.
+              Pick a conversation, or click <strong>new</strong> to start a direct conversation
+              with a Carbon or a Silicon.
             </p>
           </div>
         </section>
       )}
+
       <NewDirectDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
@@ -87,6 +225,11 @@ export default function ChatPage() {
           setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
           router.push(`/chat?room=${room.room_id}`);
         }}
+      />
+      <TeamPanel
+        slug={panelSlug}
+        open={panelSlug !== null}
+        onOpenChange={(v) => !v && setPanelSlug(null)}
       />
     </>
   );

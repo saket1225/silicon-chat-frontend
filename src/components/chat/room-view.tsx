@@ -1,17 +1,22 @@
 "use client";
 
 import * as React from "react";
+import { MagnifyingGlass, X } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { roomDisplay } from "@/lib/peers";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Composer } from "@/components/chat/composer";
-import { MessageBubble } from "@/components/chat/message-bubble";
+import { IdAvatar } from "@/components/profile/id-avatar";
+import { Composer, type OptimisticPayload } from "@/components/chat/composer";
+import { MessageBubble, type MessageStatus } from "@/components/chat/message-bubble";
 import { ProgressCard, type ProgressEntry } from "@/components/chat/progress-card";
+import { ProfileDrawer } from "@/components/chat/profile-drawer";
 
 interface Props {
   room: Room;
@@ -22,51 +27,131 @@ interface Props {
   };
 }
 
+type LocalEvent = Event & {
+  _status?: MessageStatus;
+  _clientId?: string;
+};
+
+const TEMP_ID = (clientId: string) => `temp-${clientId}`;
+// Background refresh interval — keeps relative timestamps, read receipts,
+// and any out-of-band events fresh even if the WS connection blips.
+const POLL_INTERVAL_MS = 10_000;
+
 export function RoomView({ room, socket }: Props) {
   const { carbon } = useAuth();
-  const [events, setEvents] = React.useState<Event[]>([]);
+  const myUsername = carbon?.username ?? null;
+  const display = roomDisplay(room);
+
+  const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [progress, setProgress] = React.useState<Record<string, ProgressEntry>>({});
-  const endRef = React.useRef<HTMLDivElement>(null);
+  const [profileOpen, setProfileOpen] = React.useState(false);
+  const [focusSender, setFocusSender] = React.useState<{
+    kind: "carbon" | "silicon";
+    handle: string;
+  } | null>(null);
+  const [search, setSearch] = React.useState<string | null>(null);
+  const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
+  const [isDropTarget, setIsDropTarget] = React.useState(false);
 
-  // Initial load
+  const endRef = React.useRef<HTMLDivElement>(null);
+  const sectionRef = React.useRef<HTMLElement>(null);
+
+  // ----- Photo URL lookup per sender (for in-message avatars) -----
+  const peerPhotoByHandle = React.useMemo(() => {
+    const m = new Map<string, string | null>();
+    for (const p of room.peers) m.set(p.handle, p.profile_photo_url);
+    return m;
+  }, [room.peers]);
+  const myPhotoUrl = carbon?.profile_photo_url ?? null;
+  const photoFor = React.useCallback(
+    (handle: string | null) => {
+      if (!handle) return null;
+      if (handle === myUsername) return myPhotoUrl;
+      return peerPhotoByHandle.get(handle) ?? null;
+    },
+    [myUsername, myPhotoUrl, peerPhotoByHandle],
+  );
+
+  // ----- Initial events load -----
+  // Single fetch on mount / room-switch. We don't poll thereafter — the WS
+  // delivers events and read_receipts in real time, and re-polling just
+  // duplicates work and (worse) cascades into extra `api.read` calls via the
+  // auto-read effect below. The 10s "ping" the design asks for is just a
+  // re-render tick for `relativeTime`, not a network fetch.
   React.useEffect(() => {
     let mounted = true;
     setLoading(true);
     api
       .events(room.room_id, undefined, 100)
       .then((evs) => {
-        if (mounted) {
-          setEvents(evs);
-          setLoading(false);
-        }
+        if (!mounted) return;
+        setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
+        setLoading(false);
       })
       .catch((e) => {
-        if (mounted) {
-          toast.error(e instanceof ApiError ? e.message : String(e));
-          setLoading(false);
-        }
+        if (!mounted) return;
+        toast.error(e instanceof ApiError ? e.message : String(e));
+        setLoading(false);
       });
     return () => {
       mounted = false;
     };
-  }, [room.room_id]);
+  }, [room.room_id, myUsername]);
 
-  // Make sure the socket is subscribed to this room (covers rooms opened after
-  // the initial WS connect, which the consumer didn't auto-join).
+  // Force a re-render every 10s so `relativeTime` advances ("just now" →
+  // "1m" → "2m"). No network — purely a UI tick.
+  const [, forceTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = window.setInterval(
+      () => forceTick((n) => n + 1),
+      POLL_INTERVAL_MS,
+    );
+    return () => window.clearInterval(id);
+  }, []);
+
+  // ----- WS subscribe + frame handling -----
   React.useEffect(() => {
     if (socket.ready) socket.send({ type: "subscribe", room_id: room.room_id });
   }, [socket.ready, room.room_id, socket.send]);
 
-  // Apply WS frames
   React.useEffect(() => {
     const f = socket.lastFrame;
     if (!f) return;
     if ("room_id" in f && f.room_id !== room.room_id) return;
     if (f.type === "event") {
+      const incoming = f.event;
+      const mine = incoming.sender_handle && incoming.sender_handle === myUsername;
       setEvents((prev) => {
-        if (prev.some((e) => e.event_id === f.event.event_id)) return prev;
-        return [...prev, f.event];
+        const existsIdx = prev.findIndex((e) => e.event_id === incoming.event_id);
+        if (existsIdx >= 0) {
+          if (!mine) return prev;
+          const updated = [...prev];
+          const cur = updated[existsIdx];
+          if (cur._status !== "read") {
+            updated[existsIdx] = { ...cur, _status: "delivered" };
+          }
+          return updated;
+        }
+        if (mine) {
+          const optIdx = prev.findIndex(
+            (e) =>
+              e._status === "pending" &&
+              e.sender_handle === incoming.sender_handle &&
+              e.type === incoming.type &&
+              JSON.stringify(e.content) === JSON.stringify(incoming.content),
+          );
+          if (optIdx >= 0) {
+            const updated = [...prev];
+            updated[optIdx] = {
+              ...incoming,
+              _clientId: prev[optIdx]._clientId,
+              _status: "delivered",
+            };
+            return updated;
+          }
+        }
+        return [...prev, { ...incoming, _status: mine ? "delivered" : undefined }];
       });
     } else if (f.type === "event.delta") {
       setEvents((prev) =>
@@ -91,6 +176,15 @@ export function RoomView({ room, socket }: Props) {
         prev.map((e) =>
           e.event_id === f.event_id
             ? { ...e, content: { ...e.content, transcript: f.transcript } }
+            : e,
+        ),
+      );
+    } else if (f.type === "read_receipt") {
+      const cutoff = f.event_id;
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.sender_handle === myUsername && e.event_id <= cutoff
+            ? { ...e, _status: "read" }
             : e,
         ),
       );
@@ -121,81 +215,346 @@ export function RoomView({ room, socket }: Props) {
         });
       }
     }
-  }, [socket.lastFrame, room.room_id]);
+  }, [socket.lastFrame, room.room_id, myUsername]);
 
-  // Scroll to bottom on new content
+  // ----- Scroll-to-bottom + auto-read -----
   React.useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [events.length, progress]);
 
-  // Mark read when last event changes
-  React.useEffect(() => {
-    if (events.length === 0) return;
-    const last = events[events.length - 1];
-    api.read(room.room_id, last.event_id).catch(() => undefined);
-  }, [events, room.room_id]);
+  // Auto-read: derive the latest event from someone other than me, and only
+  // POST when *that event_id* changes. The previous version depended on the
+  // entire `events` array, which fires on every poll, every optimistic add,
+  // and every WS frame — flooding the server with idempotent reads.
+  const lastTheirsEventId = React.useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i--) {
+      const e = events[i];
+      if (e.sender_handle && e.sender_handle !== myUsername) return e.event_id;
+    }
+    return null;
+  }, [events, myUsername]);
 
+  React.useEffect(() => {
+    if (!lastTheirsEventId) return;
+    api.read(room.room_id, lastTheirsEventId).catch(() => undefined);
+  }, [lastTheirsEventId, room.room_id]);
+
+  // ----- Take-back -----
   const onTakeBack = async (eventId: string, force = false) => {
     try {
       const r = await api.takeBack(eventId, "manual", force);
-      if (r && "detail" in r) {
-        toast.error(r.detail);
-      } else {
-        toast.success("took back");
-      }
+      if (r && "detail" in r) toast.error(r.detail);
+      else toast.success("took back");
     } catch (e) {
-      const msg = e instanceof ApiError ? e.message : String(e);
-      toast.error(msg);
+      toast.error(e instanceof ApiError ? e.message : String(e));
     }
   };
 
+  // ----- Optimistic send plumbing -----
+  const onOptimisticAdd = React.useCallback(
+    (clientId: string, payload: OptimisticPayload) => {
+      if (!myUsername) return;
+      const now = new Date().toISOString();
+      const placeholder: LocalEvent = {
+        event_id: TEMP_ID(clientId),
+        room: 0,
+        sender_kind: "carbon",
+        sender_id: null,
+        sender_handle: myUsername,
+        type: payload.type,
+        content: payload.content ?? {},
+        reply_to_event_id: payload.reply_to_event_id ?? "",
+        is_final: true,
+        created_at: now,
+        edited_at: null,
+        redacted_at: null,
+        redaction_reason: "",
+        _status: "pending",
+        _clientId: clientId,
+      };
+      setEvents((prev) => [...prev, placeholder]);
+    },
+    [myUsername],
+  );
+
+  const onAck = React.useCallback((clientId: string, real: Event) => {
+    setEvents((prev) => {
+      const optIdx = prev.findIndex((e) => e._clientId === clientId);
+      const dupIdx = prev.findIndex(
+        (e) => e.event_id === real.event_id && e._clientId !== clientId,
+      );
+      if (optIdx >= 0 && dupIdx < 0) {
+        const updated = [...prev];
+        updated[optIdx] = { ...real, _clientId: clientId, _status: "sent" };
+        return updated;
+      }
+      if (optIdx >= 0 && dupIdx >= 0) {
+        const updated = [...prev];
+        const dup = updated[dupIdx];
+        updated[dupIdx] = {
+          ...dup,
+          _clientId: clientId,
+          _status: dup._status ?? "sent",
+        };
+        updated.splice(optIdx, 1);
+        return updated;
+      }
+      if (dupIdx >= 0) {
+        const updated = [...prev];
+        updated[dupIdx] = { ...updated[dupIdx], _status: updated[dupIdx]._status ?? "sent" };
+        return updated;
+      }
+      return prev;
+    });
+  }, []);
+
+  const onFail = React.useCallback((clientId: string, err: unknown) => {
+    setEvents((prev) =>
+      prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
+    );
+    toast.error(err instanceof ApiError ? err.message : String(err));
+  }, []);
+
+  // ----- Drag-and-drop a file onto the chat surface -----
+  const onDragEnter = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+    setIsDropTarget(true);
+  };
+  const onDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes("Files")) return;
+    e.preventDefault();
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    // We get bogus dragleave events as the cursor crosses child elements.
+    // Filter to the actual exit by checking relatedTarget.
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setIsDropTarget(false);
+  };
+  const onDrop = (e: React.DragEvent) => {
+    if (!e.dataTransfer.files.length) return;
+    e.preventDefault();
+    setIsDropTarget(false);
+    setDroppedFile(e.dataTransfer.files[0]);
+  };
+
+  // ----- Search filter -----
+  const filteredEvents = React.useMemo(() => {
+    if (!search) return events;
+    const s = search.toLowerCase();
+    return events.filter((e) => {
+      const body = String(e.content.body ?? "");
+      const caption = String(e.content.caption ?? "");
+      return (
+        body.toLowerCase().includes(s) ||
+        caption.toLowerCase().includes(s) ||
+        (e.sender_handle ?? "").toLowerCase().includes(s)
+      );
+    });
+  }, [events, search]);
+
+  const openSenderProfile = React.useCallback(
+    (sender: { kind: "carbon" | "silicon"; handle: string }) => {
+      setFocusSender(sender);
+      setProfileOpen(true);
+    },
+    [],
+  );
+
   return (
-    <section className="flex flex-1 flex-col bg-background">
-      <header className="flex items-center justify-between border-b px-4 py-3">
-        <div>
-          <h2 className="text-sm font-semibold">{room.name || "direct"}</h2>
-          <p className="text-xs text-muted-foreground">
-            {room.kind} · {room.room_id}
-          </p>
-        </div>
-        <Badge variant={socket.ready ? "success" : "secondary"}>
-          {socket.ready ? "live" : "offline"}
-        </Badge>
+    <section
+      ref={sectionRef}
+      onDragEnter={onDragEnter}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+      className="relative flex flex-1 flex-col bg-background"
+    >
+      {/* Header — clicking anywhere on the left side opens the profile. */}
+      <header className="flex items-center gap-3 border-b py-3 pl-6 pr-6">
+        <button
+          type="button"
+          onClick={() => {
+            setFocusSender(null);
+            setProfileOpen(true);
+          }}
+          className="flex min-w-0 flex-1 items-center gap-3 text-left transition-opacity hover:opacity-80"
+          title="view profile & attachments"
+        >
+          <IdAvatar seed={display.handle} src={display.photoUrl} size={36} />
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold tracking-tight">
+              {display.name}
+            </h2>
+            <p className="truncate text-xs text-muted-foreground">
+              {socket.ready ? display.subtitle : "offline"}
+            </p>
+          </div>
+        </button>
+        {search === null ? (
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => setSearch("")}
+            aria-label="search messages"
+            title="search messages"
+          >
+            <MagnifyingGlass />
+          </Button>
+        ) : (
+          <SearchBar value={search} onChange={setSearch} onClose={() => setSearch(null)} />
+        )}
       </header>
+
+      <ProfileDrawer
+        room={room}
+        events={events}
+        currentUsername={carbon?.username}
+        open={profileOpen}
+        onOpenChange={(v) => {
+          setProfileOpen(v);
+          if (!v) setFocusSender(null);
+        }}
+        focusSender={focusSender}
+      />
+
       <ScrollArea className="flex-1">
-        <div className="mx-auto w-full max-w-3xl px-4 py-4">
+        {/* Messages bleed to the same horizontal margins as the navbar's
+            logo (left) and avatar (right) — px-6 matches the app shell. */}
+        <div className="w-full px-6 py-4">
           {loading ? (
             <div className="text-sm text-muted-foreground">loading messages…</div>
-          ) : events.length === 0 ? (
-            <div className="rounded-md border bg-muted/40 p-6 text-sm text-muted-foreground">
-              no messages yet. say hi.
+          ) : filteredEvents.length === 0 ? (
+            <div className="border bg-muted/40 p-6 text-sm text-muted-foreground">
+              {search ? "no matches in this chat" : "no messages yet. say hi."}
             </div>
           ) : (
-            events.map((e) => (
-              <MessageBubble
-                key={e.event_id}
-                event={e}
-                isMine={isMyEvent(e, carbon?.username)}
-                onTakeBack={onTakeBack}
-              />
-            ))
+            filteredEvents.map((e, i) => {
+              // Group consecutive messages by (sender_handle, minute):
+              //   • showSender on the FIRST bubble of a run (received only)
+              //   • showTime on the LAST bubble of a run
+              // The minute compare uses the YYYY-MM-DDTHH:MM slice of the ISO
+              // string so we don't bring a Date constructor + tz math into a
+              // hot render path.
+              const prev = filteredEvents[i - 1];
+              const next = filteredEvents[i + 1];
+              const sameAs = (a?: LocalEvent | Event) =>
+                !!a &&
+                a.sender_handle === e.sender_handle &&
+                a.created_at.slice(0, 16) === e.created_at.slice(0, 16);
+              const showSender = !sameAs(prev);
+              const showTime = !sameAs(next);
+              return (
+                <MessageBubble
+                  key={e._clientId ?? e.event_id}
+                  event={e}
+                  isMine={isMyEvent(e, myUsername)}
+                  status={e._status}
+                  senderPhotoUrl={photoFor(e.sender_handle)}
+                  onSenderClick={openSenderProfile}
+                  onTakeBack={onTakeBack}
+                  showSender={showSender}
+                  showTime={showTime}
+                />
+              );
+            })
           )}
           <ProgressCard entries={Object.values(progress)} />
           <div ref={endRef} />
         </div>
       </ScrollArea>
-      <Composer roomId={room.room_id} />
+
+      <Composer
+        roomId={room.room_id}
+        onOptimisticAdd={onOptimisticAdd}
+        onAck={onAck}
+        onFail={onFail}
+        droppedFile={droppedFile}
+        onDroppedFileConsumed={() => setDroppedFile(null)}
+      />
+
+      {/* Visual hint while a file is hovering over the chat surface. */}
+      <DropOverlay visible={isDropTarget} />
     </section>
   );
 }
 
-// Carbon objects from the API don't include the internal numeric `id`, so we
-// can't reliably compare sender_id. As a heuristic, treat anything sent by
-// kind=carbon AND not in the past 60s timeframe as "theirs". For now: just
-// check whether the event is from the *role* of the user. Since this is a
-// local-test client, this approximation is OK.
-function isMyEvent(_event: Event, _username?: string) {
-  // Without exposing numeric Carbon.id on /me, we don't know precisely.
-  // The chat shows alignment based on sender_kind for now.
-  return false;
+function SearchBar({
+  value,
+  onChange,
+  onClose,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="flex w-56 items-center gap-1 border border-input bg-transparent px-2 transition-colors focus-within:border-ring">
+      <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
+      <input
+        autoFocus
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") onClose();
+        }}
+        placeholder="search messages"
+        className="h-9 w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+      />
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="close search"
+        className="text-muted-foreground hover:text-foreground"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
+function DropOverlay({ visible }: { visible: boolean }) {
+  if (!visible) return null;
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/80 backdrop-blur-sm">
+      <div className="border-2 border-dashed border-foreground/30 bg-card px-6 py-4 text-sm text-foreground/80">
+        drop to attach
+      </div>
+    </div>
+  );
+}
+
+function isMyEvent(e: Event, myUsername: string | null) {
+  if (!myUsername) return false;
+  return e.sender_kind === "carbon" && e.sender_handle === myUsername;
+}
+
+/**
+ * Reconcile a fresh server snapshot with our locally-tracked events without
+ * blowing away optimistic rows or hard-won _status upgrades.
+ *
+ * • Every server event is the source of truth for its content — but we keep
+ *   our existing `_status` so a poll never downgrades a "read" tick back to
+ *   "delivered".
+ * • Any local row the server didn't echo back this round is preserved (our
+ *   optimistic placeholders, and any just-sent rows that didn't fit in the
+ *   100-event polling window).
+ */
+function mergeServerEvents(
+  prev: LocalEvent[],
+  server: Event[],
+  myUsername: string | null,
+): LocalEvent[] {
+  const serverIds = new Set(server.map((e) => e.event_id));
+  const byPrev = new Map(prev.map((e) => [e.event_id, e] as const));
+  const merged: LocalEvent[] = server.map((ev) => {
+    const existing = byPrev.get(ev.event_id);
+    if (existing) {
+      return { ...ev, _status: existing._status, _clientId: existing._clientId };
+    }
+    const mine = ev.sender_handle && ev.sender_handle === myUsername;
+    return { ...ev, _status: mine ? ("delivered" as MessageStatus) : undefined };
+  });
+  const localOnly = prev.filter((e) => !serverIds.has(e.event_id));
+  return [...merged, ...localOnly];
 }

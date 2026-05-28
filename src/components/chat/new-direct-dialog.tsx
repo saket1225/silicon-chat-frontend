@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Loader2 } from "lucide-react";
+import { CircleNotch } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -95,7 +95,7 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
               </Button>
             </DialogClose>
             <Button onClick={start} disabled={!handle || loading}>
-              {loading && <Loader2 className="animate-spin" />}
+              {loading && <CircleNotch className="animate-spin" />}
               open
             </Button>
           </div>

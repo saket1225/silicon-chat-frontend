@@ -1,4 +1,4 @@
-// Backend response shapes — matches apps/*/serializers.py.
+// Glass response shapes — matches apps/*/serializers.py.
 
 export type Kind = "carbon" | "silicon" | "system";
 
@@ -28,6 +28,9 @@ export interface Carbon {
   phone: string;
   name: string;
   profile_photo_key: string;
+  profile_photo_url: string | null;
+  tagline: string;
+  timezone: string;
   email_verified_at: string | null;
   phone_verified_at: string | null;
   created_at: string;
@@ -38,13 +41,18 @@ export interface CarbonPublic {
   username: string;
   name: string;
   profile_photo_key: string;
+  profile_photo_url: string | null;
+  tagline: string;
+  timezone: string;
 }
 
 export interface Silicon {
   silicon_id: string;
   name: string;
   profile_photo_key: string;
-  owner_org_id: number;
+  profile_photo_url: string | null;
+  tagline: string;
+  owner_team_id: number;
   capabilities: Record<string, unknown>;
   is_active: boolean;
   created_at: string;
@@ -54,12 +62,25 @@ export interface SiliconPublic {
   silicon_id: string;
   name: string;
   profile_photo_key: string;
+  profile_photo_url: string | null;
+  tagline: string;
+}
+
+export interface RoomPeer {
+  kind: "carbon" | "silicon";
+  handle: string;
+  name: string;
+  profile_photo_url: string | null;
 }
 
 export interface Room {
   room_id: string;
   kind: "direct" | "group";
-  org: number | null;
+  team: number | null;
+  team_slug: string | null;
+  peer_kinds: Kind[]; // member kinds excluding self — for Carbons/Silicons filters
+  peers: RoomPeer[]; // resolved counterpart projections (one entry for direct rooms)
+  unread: boolean;
   name: string;
   topic: string;
   settings: Record<string, unknown>;
@@ -67,6 +88,105 @@ export interface Room {
   created_by_id: number | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface Team {
+  team_id: string;
+  name: string;
+  slug: string;
+  team_heads: string[]; // carbon_ids
+  settings: { let_employees_invite: boolean; verify_carbons: boolean } & Record<string, unknown>;
+  email_whitelist: { domains: string[]; emails: string[] };
+  trust_chart: Record<string, unknown>;
+  tags: unknown[];
+  notes: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TeamMembership {
+  id: number;
+  team: number;
+  member_kind: Kind;
+  member_id: number;
+  member_handle: string | null;
+  role: string;
+  joined_at: string;
+}
+
+export interface Invite {
+  id: number;
+  token: string;
+  scope: "team" | "silicon";
+  silicon_id: string | null;
+  channel: "link" | "email";
+  code: string;
+  email_target: string;
+  role: string;
+  max_uses: number;
+  uses: number;
+  expires_at: string;
+  claimed_at: string | null;
+  created_at: string;
+}
+
+export interface Invitee {
+  id: number;
+  member_kind: Kind;
+  member_handle: string | null;
+  invited_by: string | null;
+  silicon_name: string | null;
+  joined_at: string;
+}
+
+export interface BillingRecord {
+  id: number;
+  kind: "one_time" | "recurring";
+  description: string;
+  amount_cents: number;
+  currency: string;
+  period_start: string | null;
+  period_end: string | null;
+  created_at: string;
+}
+
+export interface BillingAddon {
+  id: number;
+  label: string;
+  amount_cents: number;
+  currency: string;
+  recurring: boolean;
+  active: boolean;
+  created_at: string;
+}
+
+export interface BillingCycle {
+  id: number;
+  period_start: string;
+  period_end: string;
+  status: "open" | "charged" | "paid" | "failed";
+  total_cents: number;
+  currency: string;
+  records: BillingRecord[];
+  created_at: string;
+}
+
+export interface BillingData {
+  plan: { monthly_cost_cents: number; currency: string };
+  addons: BillingAddon[];
+  cycles: BillingCycle[];
+}
+
+export interface InviteInfo {
+  scope: "team" | "silicon";
+  team_slug: string;
+  team_name: string;
+  silicon_name: string | null;
+  channel: "link" | "email";
+  needs_code: boolean;
+  verify_carbons: boolean;
+  whitelist: { domains: string[]; emails: string[] } | null;
+  role: string;
 }
 
 export interface Event {
