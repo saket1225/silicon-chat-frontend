@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Loader2, Play } from "lucide-react";
+import { CircleNotch, Play } from "@phosphor-icons/react/dist/ssr";
 
 import { ApiError } from "@/lib/api";
 
@@ -62,7 +62,7 @@ export function EndpointCard({ title, description, controls, run, method, path }
         <div className="space-y-2">{controls}</div>
         <div className="flex items-center gap-2">
           <Button onClick={handleRun} disabled={loading} size="sm">
-            {loading ? <Loader2 className="animate-spin" /> : <Play />}
+            {loading ? <CircleNotch className="animate-spin" /> : <Play />}
             run
           </Button>
           {status !== null && (

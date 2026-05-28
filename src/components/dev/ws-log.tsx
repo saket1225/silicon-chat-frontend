@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Activity, Pause, Play, Trash2 } from "lucide-react";
+import { Pause, Play, Pulse, Trash } from "@phosphor-icons/react/dist/ssr";
 
 import { useChatSocket } from "@/lib/ws";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,7 @@ export function WsLog() {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
         <CardTitle className="flex items-center gap-2 text-base">
-          <Activity className="h-4 w-4" />
+          <Pulse className="h-4 w-4" />
           live WS event log
           <Badge variant={socket.ready ? "success" : "secondary"}>
             {socket.ready ? "live" : "offline"}
@@ -40,7 +40,7 @@ export function WsLog() {
             {paused ? "resume" : "pause"}
           </Button>
           <Button variant="ghost" size="sm" onClick={() => setEntries([])}>
-            <Trash2 className="h-3.5 w-3.5" />
+            <Trash className="h-3.5 w-3.5" />
             clear
           </Button>
         </div>
