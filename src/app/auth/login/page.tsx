@@ -22,7 +22,17 @@ import { ResendRow } from "@/components/auth/resend-row";
 type Mode = "text" | "phone";
 type Phase = "identify" | "choose" | "code";
 
+// Wraps the real page in a Suspense boundary because `useSearchParams()` in
+// the inner component bails out of static prerender otherwise.
 export default function LoginPage() {
+  return (
+    <React.Suspense fallback={null}>
+      <LoginPageInner />
+    </React.Suspense>
+  );
+}
+
+function LoginPageInner() {
   const router = useRouter();
   // Query params come from a sign-up pivot ("?identifier=…&notice=existing").
   // A "+"-prefixed identifier opens phone mode and pre-fills country + number.

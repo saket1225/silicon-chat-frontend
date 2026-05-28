@@ -30,7 +30,17 @@ function loadSidebarWidth(): number {
   return Number.isFinite(v) && v >= SB_MIN && v <= SB_MAX ? v : SB_DEFAULT;
 }
 
+// Suspense wrapper so `useSearchParams()` (reads ?room=…) doesn't bail
+// static prerender.
 export default function ChatPage() {
+  return (
+    <React.Suspense fallback={null}>
+      <ChatPageInner />
+    </React.Suspense>
+  );
+}
+
+function ChatPageInner() {
   const router = useRouter();
   const search = useSearchParams();
   const selected = search.get("room");

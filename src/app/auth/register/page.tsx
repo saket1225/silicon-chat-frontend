@@ -35,7 +35,17 @@ type Avail =
 
 const CARBON_ID_RE = /^[a-z0-9_.-]{3,32}$/;
 
+// Suspense wrapper so `useSearchParams()` (email/phone/notice handoff from
+// /login) doesn't blow up static prerender.
 export default function RegisterPage() {
+  return (
+    <React.Suspense fallback={null}>
+      <RegisterPageInner />
+    </React.Suspense>
+  );
+}
+
+function RegisterPageInner() {
   const router = useRouter();
   // Either or both may be handed over from a login pivot ("no account yet"):
   // ?email=…   ?phone=+E.164   ?notice=new

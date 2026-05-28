@@ -18,7 +18,17 @@ import { Logo } from "@/components/logo";
 import { OtpInput } from "@/components/auth/otp-input";
 import { ResendRow } from "@/components/auth/resend-row";
 
+// Suspense wrapper so `useSearchParams()` (reads ?code=…) doesn't bail
+// static prerender.
 export default function JoinPage() {
+  return (
+    <React.Suspense fallback={null}>
+      <JoinPageInner />
+    </React.Suspense>
+  );
+}
+
+function JoinPageInner() {
   const router = useRouter();
   const params = useParams<{ token: string }>();
   const token = params.token;
