@@ -73,6 +73,17 @@ export interface RoomPeer {
   profile_photo_url: string | null;
 }
 
+export interface RoomLastEvent {
+  /** One-line preview suitable for the sidebar — already type-aware. */
+  preview: string;
+  /** ISO of when this event was authored. */
+  at: string;
+  /** Sender handle, when applicable (system events have null). */
+  sender_handle: string | null;
+  /** The Event.type, so the sidebar can prefix or icon-decorate appropriately. */
+  type: string;
+}
+
 export interface Room {
   room_id: string;
   kind: "direct" | "group";
@@ -81,6 +92,9 @@ export interface Room {
   peer_kinds: Kind[]; // member kinds excluding self — for Carbons/Silicons filters
   peers: RoomPeer[]; // resolved counterpart projections (one entry for direct rooms)
   unread: boolean;
+  /** Lightweight last-event projection so the sidebar can show a preview
+   *  without an N+1 fetch per room. Null when the room has no events. */
+  last_event: RoomLastEvent | null;
   name: string;
   topic: string;
   settings: Record<string, unknown>;

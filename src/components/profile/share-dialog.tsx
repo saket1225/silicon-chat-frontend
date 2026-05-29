@@ -76,7 +76,7 @@ export function ShareDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-sm">
+      <DialogContent className="max-h-[90vh] max-w-sm overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Share your chat</DialogTitle>
           <DialogDescription>

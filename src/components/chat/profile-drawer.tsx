@@ -150,11 +150,11 @@ export function ProfileDrawer({
           <DialogTitle>{displayName}</DialogTitle>
         </DialogHeader>
 
-        {/* Avatar in a centered card — the focal point of the dialog. */}
+        {/* Avatar centered — the IdAvatar already carries its own hairline
+            border. Stacking another bordered card around it was the "two
+            bounding boxes" the user noticed. Single box now. */}
         <div className="flex flex-col items-center gap-3">
-          <div className="border bg-card p-4">
-            <IdAvatar seed={handle || "?"} src={photoUrl} size={120} />
-          </div>
+          <IdAvatar seed={handle || "?"} src={photoUrl} size={132} />
           <div className="text-center">
             <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
             {profile && (

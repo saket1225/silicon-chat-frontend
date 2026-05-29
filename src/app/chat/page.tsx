@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Plus } from "@phosphor-icons/react/dist/ssr";
+import { MagnifyingGlass, Plus } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
@@ -50,6 +50,9 @@ function ChatPageInner() {
   const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
   const [panelSlug, setPanelSlug] = React.useState<string | null>(null);
   const [sidebarW, setSidebarW] = React.useState<number>(loadSidebarWidth);
+  // Sidebar search — filters the conversation list by display name, handle,
+  // or last message body.
+  const [sidebarQuery, setSidebarQuery] = React.useState("");
   // Hover-to-switch while dragging a file over a sidebar row.
   const [hoverRoomId, setHoverRoomId] = React.useState<string | null>(null);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -154,13 +157,30 @@ function ChatPageInner() {
   }, [socket.lastFrame, rooms, refresh]);
 
   const filtered = React.useMemo(() => {
+    const q = sidebarQuery.trim().toLowerCase();
     return rooms.filter((r) => {
+      // #8 — Unread filter hides any room that has nothing new for me.
       if (filters.unread && !r.unread) return false;
       if (filters.teams.length && !(r.team_slug && filters.teams.includes(r.team_slug))) return false;
       if (filters.kinds.length && !filters.kinds.some((k) => r.peer_kinds.includes(k))) return false;
+      if (q) {
+        const hayName = (r.name || "").toLowerCase();
+        const hayPeer = r.peers
+          .map((p) => `${p.name} ${p.handle}`)
+          .join(" ")
+          .toLowerCase();
+        const hayLast = (r.last_event?.preview ?? "").toLowerCase();
+        if (
+          !hayName.includes(q) &&
+          !hayPeer.includes(q) &&
+          !hayLast.includes(q)
+        ) {
+          return false;
+        }
+      }
       return true;
     });
-  }, [rooms, filters]);
+  }, [rooms, filters, sidebarQuery]);
 
   const selectedRoom = rooms.find((r) => r.room_id === selected);
 
@@ -171,7 +191,9 @@ function ChatPageInner() {
       <aside
         style={{ ["--sidebar-w" as string]: `${sidebarW}px` }}
         className={cn(
-          "relative w-full shrink-0 flex-col border-r md:flex md:w-[var(--sidebar-w)]",
+          // `min-h-0` so the room list scrolls *inside* the aside instead of
+          // pushing the page taller than the viewport.
+          "relative min-h-0 w-full shrink-0 flex-col border-r md:flex md:w-[var(--sidebar-w)]",
           selected ? "hidden" : "flex",
         )}
       >
@@ -183,15 +205,25 @@ function ChatPageInner() {
           aria-label="resize sidebar"
           className="absolute right-0 top-0 z-10 hidden h-full w-1.5 cursor-col-resize transition-colors hover:bg-border md:block"
         />
-        <div className="flex items-center justify-between border-b py-1.5 pl-6 pr-2">
-          <h2 className="text-sm font-semibold tracking-tight">Chats</h2>
+        {/* Search input replaces the "Chats" header. Filters the room list
+            by display name, handle, or last-message body. */}
+        <div className="flex items-center gap-2 border-b py-1.5 pl-6 pr-2">
+          <div className="flex h-9 flex-1 items-center gap-1.5 border border-input bg-transparent px-2 transition-colors focus-within:border-ring">
+            <MagnifyingGlass className="h-3.5 w-3.5 shrink-0 opacity-60" />
+            <input
+              value={sidebarQuery}
+              onChange={(e) => setSidebarQuery(e.target.value)}
+              placeholder="search Carbons + Silicons"
+              className="h-full w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+            />
+          </div>
           <Button
             size="icon"
             variant="ghost"
             onClick={() => setDialogOpen(true)}
             aria-label="new chat"
             title="new chat"
-            className="h-7 w-7"
+            className="h-7 w-7 shrink-0"
           >
             <Plus />
           </Button>

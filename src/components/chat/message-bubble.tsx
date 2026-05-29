@@ -12,6 +12,7 @@ import {
 } from "@phosphor-icons/react/dist/ssr";
 
 import type { Event, ProgressState } from "@/lib/types";
+import { renderMarkdown } from "@/lib/markdown";
 import { cn, relativeTime } from "@/lib/utils";
 
 import { Badge } from "@/components/ui/badge";
@@ -52,6 +53,8 @@ interface Props {
   showTime?: boolean;
   /** First bubble of a (received) sender run renders the avatar + handle. */
   showSender?: boolean;
+  /** When true the @handle line is dropped — there's only one peer. */
+  isDirect?: boolean;
 }
 
 export function MessageBubble({
@@ -64,6 +67,7 @@ export function MessageBubble({
   onSenderClick,
   showTime = true,
   showSender = true,
+  isDirect = false,
 }: Props) {
   if (event.type === "m.system") {
     return (
@@ -146,20 +150,24 @@ export function MessageBubble({
         </div>
       )}
       <div className={cn("max-w-[70%] space-y-1", isMine && "items-end")}>
-        {/* Sender label on the first received bubble of a run only. */}
-        {!isMine && showSender && (
+        {/* Sender label on the first received bubble of a run only. Skipped
+            entirely in a direct (1-on-1) room since the peer is implicit. */}
+        {!isMine && showSender && !isDirect && (
           <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
             <span>{senderLabel}</span>
           </div>
         )}
         <div
           className={cn(
-            "group relative rounded-lg px-3 py-2 text-sm",
+            // Symmetric p-3 padding so an inline image/file inside the bubble
+            // has equal whitespace on top and left (previously px-3 py-2 left
+            // visible asymmetry around media attachments).
+            "group relative p-3 text-sm",
             redacted
               ? "border bg-muted text-muted-foreground italic"
               : isMine
                 ? "bg-primary text-primary-foreground"
-                : "border bg-card",
+                : "border bg-bubble-received",
           )}
         >
           {redacted ? (
@@ -248,7 +256,11 @@ function Body({ event }: { event: Event }) {
   const c = event.content;
   switch (event.type) {
     case "m.text":
-      return <div className="whitespace-pre-wrap break-words">{String(c.body ?? "")}</div>;
+      return (
+        <div className="whitespace-pre-wrap break-words">
+          {renderMarkdown(String(c.body ?? ""))}
+        </div>
+      );
     case "m.image":
     case "m.file":
       return c.media_id ? (

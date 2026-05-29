@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { roomDisplay } from "@/lib/peers";
+import { playReceived, playSent } from "@/lib/sounds";
 import type { Event, ProgressState, Room, WsFrame } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -122,6 +123,12 @@ export function RoomView({ room, socket }: Props) {
     if (f.type === "event") {
       const incoming = f.event;
       const mine = incoming.sender_handle && incoming.sender_handle === myUsername;
+      // Audible "received" tone for messages from someone else. Skipped when
+      // the event echoes back to me (already played the sent tone) or when
+      // the message is a system/progress event (not interactive).
+      if (!mine && (incoming.type === "m.text" || incoming.type === "m.image" || incoming.type === "m.file" || incoming.type === "m.voice")) {
+        playReceived();
+      }
       setEvents((prev) => {
         const existsIdx = prev.findIndex((e) => e.event_id === incoming.event_id);
         if (existsIdx >= 0) {
@@ -273,6 +280,9 @@ export function RoomView({ room, socket }: Props) {
         _clientId: clientId,
       };
       setEvents((prev) => [...prev, placeholder]);
+      // Audible "sent" tone — small ascending chirp. Respects reduced-motion
+      // + the silicon-interface:sounds=off opt-out.
+      playSent();
     },
     [myUsername],
   );
@@ -362,16 +372,22 @@ export function RoomView({ room, socket }: Props) {
   );
 
   return (
+    // `min-h-0` is the key — without it, a flex child grows to its content's
+    // intrinsic height, the chat list overflows the viewport, and the
+    // sidebar/composer get pushed down. With min-h-0 the section participates
+    // in flex sizing properly and only the inner ScrollArea scrolls.
     <section
       ref={sectionRef}
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className="relative flex flex-1 flex-col bg-background"
+      className="relative flex min-h-0 flex-1 flex-col bg-background"
     >
       {/* Header — clicking anywhere on the left side opens the profile. */}
-      <header className="flex items-center gap-3 border-b py-3 pl-6 pr-6">
+      {/* Header — fixed height so clicking search doesn't shift the row when
+          the search field swaps in for the icon button. */}
+      <header className="flex h-[68px] items-center gap-3 border-b pl-6 pr-6">
         <button
           type="button"
           onClick={() => {
@@ -449,6 +465,7 @@ export function RoomView({ room, socket }: Props) {
                   key={e._clientId ?? e.event_id}
                   event={e}
                   isMine={isMyEvent(e, myUsername)}
+                  isDirect={room.kind === "direct"}
                   status={e._status}
                   senderPhotoUrl={photoFor(e.sender_handle)}
                   onSenderClick={openSenderProfile}

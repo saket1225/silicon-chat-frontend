@@ -28,7 +28,36 @@ export default function RootLayout({
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
         {children}
-        <Toaster position="top-right" richColors closeButton />
+        {/* Sonner — brand-themed. richColors would override our palette, so
+            we drop it and supply colored swatches via toastOptions classes.
+            Sharp corners, hairline border, beige canvas, ink text — matches
+            cards/dialogs everywhere else. */}
+        <Toaster
+          position="top-right"
+          closeButton
+          theme="light"
+          duration={4500}
+          gap={8}
+          toastOptions={{
+            unstyled: false,
+            classNames: {
+              toast:
+                "!rounded-none !border !border-[var(--border)] !bg-[var(--card)] !text-[var(--foreground)] !shadow-none !font-sans",
+              title: "!text-sm !font-medium !tracking-tight",
+              description: "!text-xs !text-[var(--muted-foreground)]",
+              actionButton:
+                "!rounded-none !bg-[var(--primary)] !text-[var(--primary-foreground)] !text-xs",
+              cancelButton:
+                "!rounded-none !bg-transparent !text-[var(--muted-foreground)] !text-xs",
+              closeButton:
+                "!rounded-none !border-[var(--border)] !bg-[var(--card)] !text-[var(--foreground)]",
+              success: "!border-l-2 !border-l-[var(--success)]",
+              error: "!border-l-2 !border-l-[var(--destructive)]",
+              warning: "!border-l-2 !border-l-[var(--warning)]",
+              info: "!border-l-2 !border-l-[var(--muted-foreground)]",
+            },
+          }}
+        />
       </body>
     </html>
   );

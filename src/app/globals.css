@@ -39,6 +39,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-bubble-received: var(--bubble-received);
 
   /* sharp corners everywhere — every rounded-* utility resolves to a square */
   --radius-sm: 0px;
@@ -80,6 +81,9 @@
   --muted-foreground:     #666666;
   --accent:               #e5e0d7; /* hover wash */
   --accent-foreground:    #1a1a1a;
+  /* received-message bubble — a notch lighter than the canvas so messages
+     from the other party lift visibly without breaking the warm-beige feel. */
+  --bubble-received:      #f4f0e7;
 
   /* --- semantic --- */
   --destructive:          #b85c5c; /* muted red */
@@ -135,6 +139,20 @@ textarea:focus-visible,
 select:focus,
 select:focus-visible {
   outline: none;
+}
+
+/* Tailwind v4 stripped the default cursor:pointer from buttons + interactive
+   roles; restore it globally so anything clickable looks clickable without
+   each call-site needing a `cursor-pointer` class. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+a[href],
+label[for],
+summary,
+[type="submit"]:not(:disabled),
+[type="reset"]:not(:disabled),
+[type="button"]:not(:disabled) {
+  cursor: pointer;
 }
 
 /* subtle dotted texture for full-page canvases (landing, auth) */

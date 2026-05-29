@@ -274,29 +274,34 @@ export function Composer({
   return (
     <div className="space-y-2 border-t bg-background p-3">
       {file && <StagedAttachment file={file} onRemove={() => setFile(null)} />}
-      <div className="flex items-end gap-2">
+      {/* One container, hairline border, focus-within bumps to ring colour.
+          Internal 1px dividers visually separate attach | input | voice/send
+          while still reading as a single field. */}
+      <div className="flex items-stretch border border-input transition-colors focus-within:border-ring">
         <input
           type="file"
           ref={fileInputRef}
           className="hidden"
           onChange={(e) => setFile(e.target.files?.[0] || null)}
         />
-        <Button
-          size="icon"
-          variant="ghost"
+        <button
+          type="button"
           onClick={() => fileInputRef.current?.click()}
           title="attach file"
+          aria-label="attach file"
           disabled={busy}
+          className="flex w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
-        </Button>
+        </button>
         <textarea
           ref={taRef}
+          autoFocus
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="message…"
           rows={MIN_ROWS}
-          className="min-w-0 flex-1 resize-none border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors focus-visible:border-ring"
+          className="min-w-0 flex-1 resize-none self-stretch bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
           onKeyDown={(e) => {
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
@@ -304,24 +309,27 @@ export function Composer({
             }
           }}
         />
-        {/* Right-most: voice when the user has nothing typed/attached,
-            otherwise the send button — same affordance as WhatsApp. */}
         {!text.trim() && !file ? (
-          <Button
-            size="icon"
-            variant="ghost"
+          <button
+            type="button"
             onClick={() => setRecording(true)}
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"
+            className="flex w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >
             <Microphone />
-          </Button>
+          </button>
         ) : (
-          <Button onClick={send} disabled={busy}>
+          <button
+            type="button"
+            onClick={send}
+            disabled={busy}
+            aria-label="send"
+            className="flex w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+          >
             {busy ? <CircleNotch className="animate-spin" /> : <PaperPlaneRight />}
-            <span className="hidden sm:inline">send</span>
-          </Button>
+          </button>
         )}
       </div>
     </div>

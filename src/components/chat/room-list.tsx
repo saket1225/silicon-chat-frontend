@@ -88,11 +88,13 @@ export function RoomList({
                     <div className="flex items-center justify-between gap-2">
                       <span className="truncate text-sm font-medium">{d.name}</span>
                       <span className="shrink-0 text-[10px] text-muted-foreground">
-                        {relativeTime(r.updated_at)}
+                        {relativeTime(r.last_event?.at ?? r.updated_at)}
                       </span>
                     </div>
+                    {/* Last-message preview (one line, type-aware). Falls back
+                        to the static subtitle when the room has no events. */}
                     <p className="truncate text-xs text-muted-foreground">
-                      {d.subtitle}
+                      {r.last_event?.preview || d.subtitle}
                     </p>
                   </div>
                 </button>
