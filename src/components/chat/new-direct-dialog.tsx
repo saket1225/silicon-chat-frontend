@@ -83,9 +83,13 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
             <Label htmlFor="handle">handle</Label>
             <Input
               id="handle"
+              autoFocus
               placeholder={kind === "carbon" ? "alice / +14155551212 / alice@..." : "Ada"}
               value={handle}
               onChange={(e) => setHandle(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && handle && !loading) start();
+              }}
             />
           </div>
           <div className="flex justify-end gap-2">
